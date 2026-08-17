@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tiny6 encoder ladder</title>
+<script src="tiny6/ffmpeg.js"></script>
+<script src="tiny6/util.js"></script>
+<script src="tiny6/scaffold.js"></script>
+<style>
+  body{margin:0;padding:24px 18px 60px;background:#0b1838;color:#eef4ff;
+       font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:#8fa8cf;font-size:13px;margin:0 0 18px}
+  .panel{background:#0d1f45;border:1px solid #2b4a7a;border-radius:8px;padding:14px 16px;margin:12px 0}
+  h2{font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:#7eb3ff;margin:0 0 10px}
+  button{padding:9px 15px;border-radius:6px;border:1px solid #3d66a3;background:#17376d;
+         color:#fff;font-size:13px;cursor:pointer;margin:3px 6px 3px 0}
+  button.go{background:#0f5c2e;border-color:#1a9e50}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  #log{background:#050c1c;border:1px solid #2b4a7a;border-radius:6px;padding:10px;
+       height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+       font:11px/1.45 ui-monospace,Consolas,monospace;color:#b9d4ff}
+  .ok{color:#4ade80} .bad{color:#f87171} .hi{color:#fde68a} .dim{color:#7e94b8}
+  #sum{font:12px/1.6 ui-monospace,Consolas,monospace;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Encoder ladder</h1>
+  <p class="sub">Each test gets a brand new wasm core. Finds which encoder survives.</p>
+
+  <div class="panel">
+    <h2>1 · Pick a video</h2>
+    <input type="file" id="file" accept="video/*">
+  </div>
+
+  <div class="panel">
+    <h2>2 · Run</h2>
+    <button class="go" id="run" disabled>Run all tests</button>
+    <button id="clear">Clear</button>
+    <div id="sum"></div>
+  </div>
+
+  <div class="panel"><h2>3 · Output</h2><div id="log"></div></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var logEl = $('log'), sumEl = $('sum'), file = null;
+
+  function w(t, c) {
+    var s = document.createElement('span');
+    if (c) s.className = c;
+    s.textContent = t + '\n';
+    logEl.appendChild(s); logEl.scrollTop = logEl.scrollHeight;
+  }
+  var CAPS = { h264:true, vp9:true, vp8:true, hevc:true, av1:false,
+               aac:true, opus:true, multithread:false,
+               all:{ libx264:true,'libvpx-vp9':true,libvpx:true,libx265:true,
+                     aac:true,libopus:true,libvorbis:true } };
+
+  $('file').addEventListener('change', function () {
+    file = this.files[0] || null;
+    if (file) { w('File: ' + file.name + ' · ' + file.size + ' bytes', 'ok'); $('run').disabled = false; }
+  });
+  $('clear').addEventListener('click', function () { logEl.textContent=''; sumEl.textContent=''; });
+
+  // Every test runs on its own Scaffold instance = its own wasm core.
+  function runOne(t) {
+    var e = new Scaffold({ corePath:'tiny6', coreType:'st' });
+    e._caps = CAPS;
+    e._userLog = function (l) { w('   ' + l, 'dim'); };
+    var src = null;
+    w('\n--- ' + t.name + ' ---', 'hi');
+    return e.load().then(function () { return e._attach(file, 0); })
+      .then(function (s) {
+        src = s;
+        var args = ['-hide_banner','-y','-i',s.path].concat(t.args).concat([t.out]);
+        w('ffmpeg ' + args.join(' '), 'hi');
+        return e._exec(args, 300000);
+      })
+      .then(function (r) {
+        return e.ffmpeg.readFile(t.out).then(function (d) {
+          return { code: r.code, bytes: (d && d.length) || 0 };
+        }, function () { return { code: r.code, bytes: 0 }; });
+      })
+      .then(function (res) {
+        var good = res.bytes > 0;
+        w('exit=' + res.code + '  ' + t.out + ' = ' + res.bytes + ' bytes',
+          good ? 'ok' : 'bad');
+        try { e.terminate(); } catch (x) {}
+        return { name: t.name, ok: good, bytes: res.bytes, code: res.code };
+      })
+      .catch(function (err) {
+        w('THREW: ' + (err && err.message ? err.message : err), 'bad');
+        try { e.terminate(); } catch (x) {}
+        return { name: t.name, ok: false, bytes: 0, code: 'threw' };
+      });
+  }
+
+  var TESTS = [
+    { name:'1 · stream copy (no encoding at all)',
+      args:['-t','3','-c','copy','-an'], out:'t1.mp4' },
+    { name:'2 · libx264, tiny 256x192',
+      args:['-t','3','-vf','scale=256:192','-c:v','libx264','-crf','30',
+            '-preset','ultrafast','-pix_fmt','yuv420p','-an'], out:'t2.mp4' },
+    { name:'3 · VP8 (libvpx)',
+      args:['-t','3','-vf','scale=256:192','-c:v','libvpx','-crf','36',
+            '-b:v','0','-cpu-used','5','-an'], out:'t3.webm' },
+    { name:'4 · VP9 single-thread, no row-mt, no tiles',
+      args:['-t','3','-vf','scale=256:192','-c:v','libvpx-vp9','-crf','36',
+            '-b:v','0','-threads','1','-tile-columns','0','-row-mt','0',
+            '-frame-parallel','0','-deadline','realtime','-cpu-used','8','-an'],
+      out:'t4.webm' },
+    { name:'5 · VP9 at tn6 size 512x384',
+      args:['-t','3','-vf','scale=512:384','-c:v','libvpx-vp9','-crf','36',
+            '-b:v','0','-threads','1','-row-mt','0','-deadline','realtime',
+            '-cpu-used','8','-an'], out:'t5.webm' }
+  ];
+
+  $('run').addEventListener('click', function () {
+    $('run').disabled = true;
+    sumEl.textContent = '';
+    var results = [];
+    var chain = Promise.resolve();
+    TESTS.forEach(function (t) {
+      chain = chain.then(function () {
+        return runOne(t).then(function (r) { results.push(r); });
+      });
+    });
+    chain.then(function () {
+      w('\n=========== SUMMARY ===========', 'hi');
+      results.forEach(function (r) {
+        var line = (r.ok ? 'PASS  ' : 'FAIL  ') + r.name + '   (' + r.bytes + ' bytes, exit ' + r.code + ')';
+        w(line, r.ok ? 'ok' : 'bad');
+        var d = document.createElement('div');
+        d.className = r.ok ? 'ok' : 'bad';
+        d.textContent = line;
+        sumEl.appendChild(d);
+      });
+      $('run').disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>
