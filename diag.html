@@ -164,16 +164,32 @@
     }).catch(function (e) { fail(e); if (src) engine._detach(src); });
   });
 
-  // ---- D: the real thing ----------------------------------------------
+  // ---- D: the real thing, one fresh core per ffmpeg command -----------
   $('tFull').addEventListener('click', function () {
-    rule('D · FULL tn6 CONVERT');
+    rule('D · FULL tn6 CONVERT (fresh core per command)');
+    w('ffmpeg exits after every command, which aborts the wasm runtime.', 'hi');
+    w('So: probe on one core, terminate, encode on a new one.', 'hi');
+    var prog = function (p) { w('[' + p.stage + ' ' + Math.round(p.percent) + '%] ' + p.message, 'dim'); };
     var opts = Scaffold.preset('tn6', {
       crf: 36,
       luma: 1,
       onLog: function (l) { w(l, 'dim'); },
-      onProgress: function (p) { w('[' + p.stage + ' ' + Math.round(p.percent) + '%] ' + p.message, 'dim'); }
+      onProgress: prog
     });
-    engine.shrink(file, opts).then(function (r) {
+    function mk() {
+      var e = new Scaffold({ corePath: 'tiny6', coreType: 'st' });
+      e._caps = KNOWN_CAPS; e._prog = prog;
+      e._userLog = function (l) { w(l, 'dim'); };
+      return e;
+    }
+    var pe = mk();
+    pe.probe(file).then(function (info) {
+      w('probe done, terminating that core', 'ok');
+      pe.terminate();
+      var ee = mk();
+      ee.probe = function () { return Promise.resolve(info); };
+      return ee.shrink(file, opts).then(function (r) { ee.terminate(); return r; });
+    }).then(function (r) {
       w('CONVERT OK — ' + r.filename + ' · ' + r.blob.size + ' bytes', 'ok');
       try { w(JSON.stringify(r.stats, null, 1)); } catch (e) {}
     }).catch(fail);

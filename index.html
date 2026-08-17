@@ -110,62 +110,58 @@
 &lt;video data-tn6="clip.tn6" controls&gt;&lt;/video&gt;
 
 &lt;script&gt;
-  var engine = new Scaffold({
-    corePath: 'tiny6',
-    coreType: 'st'
-  });
-  engine.shrink(file, Scaffold.preset('tn6'))
-    .then(function (r) { Tiny6Player.attach(videoEl, r.blob); });
-&lt;/script&gt;</pre>
-    <p class="stat">
-      <code>scaffold.js</code> converts. <code>tiny6-player.js</code> plays, and
-      auto-upgrades any <code>&lt;video data-tn6="…"&gt;</code> on load. Neither
-      depends on the other, so a page that only plays .tn6 files can skip
-      scaffold.js and ffmpeg.wasm entirely — that is ~30 KB instead of ~30 MB.
-    </p>
-  </div>
-
-</div>
-
-<script>
-(function () {
-  'use strict';
-  var $ = function (id) { return document.getElementById(id); };
-  var engine = new Scaffold({
-    // Support files live in ./tiny6/ ; this page sits at the repo root.
-    // coreType is pinned to 'st': this core is the single-threaded build
-    // (no pthread code in ffmpeg-core.js). 'mt' would need COOP/COEP
-    // headers, which GitHub Pages cannot send.
-    // classWorkerURL is deliberately NOT set: the published @ffmpeg/ffmpeg
-    // UMD build resolves it against the author's own machine and creates a
-    // module worker, where importScripts() does not exist.
-    corePath: 'tiny6',
-    coreType: 'st'
-  });
-
-  // ---- WHY THIS BLOCK EXISTS -------------------------------------------
-  // scaffold.capabilities() probes the core by running `ffmpeg -encoders`.
-  // ffmpeg prints the list and then calls exit(), which ABORTS the
-  // emscripten runtime -- the diagnostic log shows "Aborted()" right after
-  // the encoder list. Every later exec then runs against a dead core and
-  // returns an empty log, which surfaces as the misleading errors
+  // ---- WHY THIS IS BUILT THIS WAY --------------------------------------
+  // The single-threaded @ffmpeg/core cannot run two commands. When an
+  // ffmpeg command finishes, ffmpeg calls exit(), which aborts the whole
+  // wasm runtime -- the diagnostic log shows "Aborted()" at the end of
+  // every completed run. Anything executed afterwards runs on a dead core
+  // and returns nothing, which surfaced as the misleading errors
   // "No video stream found" and "Encoding produced an empty file".
   //
-  // capabilities() returns early if _caps is already set, so seeding it
-  // here means -encoders never runs and the core survives.
-  // These values were read from this core's own encoder list.
-  engine._caps = {
-    h264: true,          // libx264
-    vp9:  true,          // libvpx-vp9
-    vp8:  true,          // libvpx
-    hevc: true,          // libx265
-    av1:  false,         // no libaom-av1 / libsvtav1 in this build
-    aac:  true,
-    opus: true,          // libopus
-    multithread: false,  // single-threaded core
+  // So: one fresh core per ffmpeg command.
+  //   phase 1  probe   -> read stream details, then terminate the core
+  //   phase 2  encode   -> a brand new core, with shrink's internal probe
+  //                        stubbed out so the encode is its ONLY command
+  //
+  // capabilities() would also spend a command on `ffmpeg -encoders`, so
+  // _caps is pre-seeded from this core's real encoder list.
+  var CAPS = {
+    h264: true, vp9: true, vp8: true, hevc: true, av1: false,
+    aac: true, opus: true, multithread: false,
     all: { libx264:true, 'libvpx-vp9':true, libvpx:true, libx265:true,
-           aac:true, libopus:true, libvorbis:true, libmp3lame:true }
+           aac:true, libopus:true, libvorbis:true }
   };
+
+  function makeEngine(onProgress) {
+    var e = new Scaffold({ corePath: 'tiny6', coreType: 'st' });
+    e._caps = CAPS;
+    if (onProgress) e._prog = onProgress;
+    return e;
+  }
+
+  // Probe on one core, encode on another. The core is cheap to recreate
+  // because the 31 MB wasm is already in the browser cache.
+  function convert(file, opts) {
+    var prog = opts.onProgress;
+    var probeEngine = makeEngine(prog);
+    return probeEngine.probe(file).then(function (info) {
+      probeEngine.terminate();
+      var encEngine = makeEngine(prog);
+      // shrink() calls this.probe() internally; that would burn this
+      // core's one command before the encode ever starts.
+      encEngine.probe = function () { return Promise.resolve(info); };
+      return encEngine.shrink(file, opts).then(function (r) {
+        encEngine.terminate();
+        return r;
+      }, function (err) {
+        encEngine.terminate();
+        throw err;
+      });
+    }, function (err) {
+      probeEngine.terminate();
+      throw err;
+    });
+  }
 
   var chosen = null, result = null;
 
@@ -220,7 +216,7 @@
       }
     });
 
-    engine.shrink(chosen, opts).then(function (r) {
+    convert(chosen, opts).then(function (r) {
       result = r;
       $('barI').style.width = '100%';
       $('stat').textContent = r.stats.summary;
