@@ -1,2 +1,3 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Do not convert line endings on anything in this repo.
+# ffmpeg-core.wasm is a 31 MB binary; CRLF conversion would corrupt it.
+* -text

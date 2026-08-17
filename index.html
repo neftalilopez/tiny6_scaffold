@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tiny6_Scaffold_Codec</title>
+
+<!-- ffmpeg.wasm, from ./tiny6/. Not a CDN: @ffmpeg/ffmpeg builds a Worker
+     from 814.ffmpeg.js and cross-origin worker scripts are blocked.
+     814.ffmpeg.js MUST stay next to ffmpeg.js inside tiny6/ - ffmpeg.js
+     locates it by its own script URL, not by this page's URL. -->
+<script src="tiny6/ffmpeg.js"></script>
+<script src="tiny6/util.js"></script>
+
+<!-- the two drop-ins. Host these anywhere and point at them. -->
+<script src="tiny6/scaffold.js"></script>
+<script src="tiny6/tiny6-player.js"></script>
+
+<style>
+  :root{
+    --ink:#eef4ff; --dim:#8fa8cf; --line:#2b4a7a;
+    --panel:#0d1f45; --deep:#081226; --edge:#3d66a3;
+    --go:#4ea1ff; --ok:#4ade80; --warn:#fbbf24;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 20px 60px;background:#0b1838;color:var(--ink);
+       font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:760px;margin:0 auto}
+  h1{margin:0 0 4px;font-size:20px;letter-spacing:.2px}
+  .sub{margin:0 0 22px;color:var(--dim);font-size:13px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+         padding:16px 18px;margin:12px 0}
+  .panel h2{margin:0 0 12px;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;
+            color:#7eb3ff;font-weight:600}
+  .drop{border:1px dashed var(--edge);border-radius:6px;padding:26px 16px;text-align:center;
+        color:var(--dim);cursor:pointer;transition:background .15s,border-color .15s}
+  .drop:hover,.drop.over{background:#10254d;border-color:var(--go);color:var(--ink)}
+  .row{display:flex;align-items:center;gap:12px;margin:10px 0}
+  .row label{width:120px;color:var(--dim);font-size:12px}
+  input[type=range]{flex:1;max-width:280px;accent-color:var(--go)}
+  .num{font:600 13px ui-monospace,Consolas,monospace;color:#fde68a;min-width:44px}
+  button{padding:9px 16px;border-radius:6px;border:1px solid var(--edge);cursor:pointer;
+         background:#17376d;color:#fff;font-size:13px}
+  button:hover:not(:disabled){background:#1e4a8a}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.go{background:#0f5c2e;border-color:#1a9e50}
+  button.go:hover:not(:disabled){background:#156e37}
+  .bar{height:14px;background:#10254d;border:1px solid var(--edge);border-radius:3px;overflow:hidden;margin-top:12px}
+  .bar i{display:block;height:100%;width:0;background:var(--go);transition:width .25s}
+  .stat{margin-top:8px;font-size:12px;color:var(--dim);min-height:1.4em}
+  video{width:100%;background:#000;border-radius:6px;margin-top:6px}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;margin:10px 0 0;
+     font:12px/1.5 ui-monospace,Consolas,monospace}
+  dt{color:var(--dim)} dd{margin:0;color:var(--ink)}
+  .note{border-left:2px solid var(--warn);padding-left:12px;margin-top:12px;
+        font-size:12px;color:#e2d6a8}
+  .hide{display:none}
+  code{background:var(--deep);padding:2px 6px;border-radius:3px;font-size:12px;color:#9ecbff}
+  pre{background:var(--deep);border:1px solid var(--line);border-radius:6px;padding:12px;
+      overflow:auto;font-size:12px;color:#9ecbff}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Tiny6_Scaffold_Codec</h1>
+  <p class="sub">Everything runs in this tab. No upload, no server.</p>
+
+  <div class="panel">
+    <h2>Convert a video to .tn6</h2>
+    <div class="drop" id="drop">
+      Drop a video here, or click to choose one
+      <input type="file" id="file" accept="video/*,.mp4,.webm,.mkv,.mov,.avi" class="hide">
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <label for="crf">Quality (CRF)</label>
+      <input type="range" id="crf" min="20" max="45" step="1" value="34">
+      <span class="num" id="crfV">34</span>
+    </div>
+    <div class="row">
+      <label for="luma">Luma scale</label>
+      <input type="range" id="luma" min="70" max="100" step="1" value="100">
+      <span class="num" id="lumaV">off</span>
+    </div>
+    <p class="stat" id="lumaHint">Luma is off. At matched size, raising CRF beat luma scaling on every clip tested.</p>
+
+    <button class="go" id="run" disabled>Convert to .tn6</button>
+    <button id="save" class="hide">Save .tn6</button>
+    <div class="bar"><i id="barI"></i></div>
+    <div class="stat" id="stat">Waiting for a file.</div>
+  </div>
+
+  <div class="panel hide" id="outPanel">
+    <h2>Result</h2>
+    <video id="player" controls playsinline></video>
+    <dl id="meta"></dl>
+    <div id="warns"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Use these on your own page</h2>
+    <pre>&lt;!-- serve these from your own origin, not a CDN --&gt;
+&lt;script src="tiny6/ffmpeg.js"&gt;&lt;/script&gt;
+&lt;script src="tiny6/util.js"&gt;&lt;/script&gt;
+&lt;script src="tiny6/scaffold.js"&gt;&lt;/script&gt;
+&lt;script src="tiny6/tiny6-player.js"&gt;&lt;/script&gt;
+
+&lt;!-- play an existing .tn6, no JS needed --&gt;
+&lt;video data-tn6="clip.tn6" controls&gt;&lt;/video&gt;
+
+&lt;script&gt;
+  var engine = new Scaffold({
+    corePath: 'tiny6',
+    coreType: 'st'
+  });
+  engine.shrink(file, Scaffold.preset('tn6'))
+    .then(function (r) { Tiny6Player.attach(videoEl, r.blob); });
+&lt;/script&gt;</pre>
+    <p class="stat">
+      <code>scaffold.js</code> converts. <code>tiny6-player.js</code> plays, and
+      auto-upgrades any <code>&lt;video data-tn6="…"&gt;</code> on load. Neither
+      depends on the other, so a page that only plays .tn6 files can skip
+      scaffold.js and ffmpeg.wasm entirely — that is ~30 KB instead of ~30 MB.
+    </p>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var engine = new Scaffold({
+    // Support files live in ./tiny6/ ; this page sits at the repo root.
+    // coreType is pinned to 'st': this core is the single-threaded build
+    // (no pthread code in ffmpeg-core.js). 'mt' would need COOP/COEP
+    // headers, which GitHub Pages cannot send.
+    // classWorkerURL is deliberately NOT set: the published @ffmpeg/ffmpeg
+    // UMD build resolves it against the author's own machine and creates a
+    // module worker, where importScripts() does not exist.
+    corePath: 'tiny6',
+    coreType: 'st'
+  });
+  var chosen = null, result = null;
+
+  // ---- file selection --------------------------------------------------
+  var drop = $('drop'), input = $('file');
+  drop.addEventListener('click', function () { input.click(); });
+  drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', function () { drop.classList.remove('over'); });
+  drop.addEventListener('drop', function (e) {
+    e.preventDefault(); drop.classList.remove('over');
+    if (e.dataTransfer.files.length) pick(e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', function () { if (input.files.length) pick(input.files[0]); });
+
+  function pick(f) {
+    chosen = f;
+    drop.textContent = f.name + '  ·  ' + (f.size / 1048576).toFixed(2) + ' MB';
+    drop.appendChild(input);
+    $('run').disabled = false;
+    $('stat').textContent = 'Ready to convert.';
+  }
+
+  // ---- controls --------------------------------------------------------
+  $('crf').addEventListener('input', function () { $('crfV').textContent = this.value; });
+  $('luma').addEventListener('input', function () {
+    var L = +this.value / 100;
+    if (L >= 1) {
+      $('lumaV').textContent = 'off';
+      $('lumaHint').textContent = 'Luma is off. At matched size, raising CRF beat luma scaling on every clip tested.';
+    } else {
+      $('lumaV').textContent = L.toFixed(2);
+      $('lumaHint').textContent = 'White 235 \u2192 ' + Math.round((235 - 16) * L + 16) +
+        '. This is permanent; no player undoes it.';
+    }
+  });
+
+  // ---- convert ---------------------------------------------------------
+  $('run').addEventListener('click', function () {
+    if (!chosen) return;
+    $('run').disabled = true;
+    $('save').classList.add('hide');
+    $('outPanel').classList.add('hide');
+    $('stat').textContent = 'Loading ffmpeg\u2026';
+
+    var opts = Scaffold.preset('tn6', {
+      crf: +$('crf').value,
+      luma: (+$('luma').value) / 100,
+      onProgress: function (p) {
+        $('barI').style.width = p.percent + '%';
+        $('stat').textContent = p.message +
+          (p.stage === 'encode' && p.percent > 0 ? ' \u2014 ' + Math.round(p.percent) + '%' : '');
+      }
+    });
+
+    engine.shrink(chosen, opts).then(function (r) {
+      result = r;
+      $('barI').style.width = '100%';
+      $('stat').textContent = r.stats.summary;
+      $('save').classList.remove('hide');
+      $('outPanel').classList.remove('hide');
+      return Tiny6Player.attach($('player'), r.blob);
+    }).then(function (meta) {
+      var s = result.stats;
+      $('meta').innerHTML =
+        row('file', result.filename) +
+        row('size', fmt(s.originalBytes) + ' \u2192 ' + fmt(s.outputBytes) +
+                    '  (' + (s.grew ? '+' : '\u2212') + Math.abs(s.reductionPercent).toFixed(1) + '%)') +
+        row('coded', meta.codedWidth + '\u00d7' + meta.codedHeight) +
+        row('display', meta.displayWidth + '\u00d7' + meta.displayHeight + ' (anamorphic)') +
+        row('codec', meta.videoCodec + (meta.audioCodec ? ' / ' + meta.audioCodec : '')) +
+        row('crf', s.crf) +
+        (s.luma ? row('luma', s.luma.toFixed(2) + ' (' + s.lumaMode + ')') : '') +
+        (s.ssim != null ? row('ssim', s.ssim.toFixed(4)) : '');
+      $('warns').innerHTML = (s.warnings || []).map(function (w) {
+        return '<p class="note">' + esc(w) + '</p>';
+      }).join('');
+      $('run').disabled = false;
+    })['catch'](function (err) {
+      $('stat').textContent = err.message;
+      $('run').disabled = false;
+    });
+  });
+
+  $('save').addEventListener('click', function () {
+    if (!result) return;
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(result.blob);
+    a.download = result.filename;
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  });
+
+  function row(k, v) { return '<dt>' + k + '</dt><dd>' + esc(String(v)) + '</dd>'; }
+  function esc(s) { return s.replace(/[&<>]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  function fmt(n) {
+    return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(1) + ' KB';
+  }
+})();
+</script>
+</body>
+</html>
