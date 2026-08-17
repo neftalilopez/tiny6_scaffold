@@ -45,7 +45,7 @@
 
   <div class="panel">
     <h2>2 · Tests</h2>
-    <button id="tCaps">A · Load engine + list encoders</button>
+    <button id="tCaps">A · Load engine (no -encoders probe)</button>
     <button id="tProbe" disabled>B · Probe only</button>
     <button id="tRaw" disabled>C · Minimal encode (bypass scaffold args)</button>
     <button id="tFull" class="go" disabled>D · Full tn6 convert</button>
@@ -75,6 +75,16 @@
 
   var engine = new Scaffold({ corePath: 'tiny6', coreType: 'st' });
 
+  // Seeding _caps skips `ffmpeg -encoders`, which aborts the wasm runtime.
+  // Test A can re-enable the probe with the checkbox.
+  var KNOWN_CAPS = {
+    h264:true, vp9:true, vp8:true, hevc:true, av1:false,
+    aac:true, opus:true, multithread:false,
+    all:{ libx264:true, 'libvpx-vp9':true, libvpx:true, libx265:true,
+          aac:true, libopus:true, libvorbis:true }
+  };
+  engine._caps = KNOWN_CAPS;
+
   // Route ALL ffmpeg output to the on-screen log. This is the piece the
   // normal page does not do, which is why failures there are opaque.
   engine._userLog = function (line) { w(line, 'dim'); };
@@ -98,6 +108,8 @@
   // ---- A: load + capabilities ------------------------------------------
   $('tCaps').addEventListener('click', function () {
     rule('A · LOAD ENGINE');
+    w('_caps is pre-seeded, so `ffmpeg -encoders` is NOT run. That command', 'hi');
+    w('aborts the wasm runtime, which was the root cause.', 'hi');
     engine._prog = function (p) { w('[' + p.stage + ' ' + Math.round(p.percent) + '%] ' + p.message, 'dim'); };
     engine.capabilities().then(function (c) {
       w('Engine loaded. usingMT=' + engine.usingMT + '  coreType=' + engine.coreType, 'ok');

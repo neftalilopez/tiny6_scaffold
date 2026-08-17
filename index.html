@@ -142,6 +142,31 @@
     corePath: 'tiny6',
     coreType: 'st'
   });
+
+  // ---- WHY THIS BLOCK EXISTS -------------------------------------------
+  // scaffold.capabilities() probes the core by running `ffmpeg -encoders`.
+  // ffmpeg prints the list and then calls exit(), which ABORTS the
+  // emscripten runtime -- the diagnostic log shows "Aborted()" right after
+  // the encoder list. Every later exec then runs against a dead core and
+  // returns an empty log, which surfaces as the misleading errors
+  // "No video stream found" and "Encoding produced an empty file".
+  //
+  // capabilities() returns early if _caps is already set, so seeding it
+  // here means -encoders never runs and the core survives.
+  // These values were read from this core's own encoder list.
+  engine._caps = {
+    h264: true,          // libx264
+    vp9:  true,          // libvpx-vp9
+    vp8:  true,          // libvpx
+    hevc: true,          // libx265
+    av1:  false,         // no libaom-av1 / libsvtav1 in this build
+    aac:  true,
+    opus: true,          // libopus
+    multithread: false,  // single-threaded core
+    all: { libx264:true, 'libvpx-vp9':true, libvpx:true, libx265:true,
+           aac:true, libopus:true, libvorbis:true, libmp3lame:true }
+  };
+
   var chosen = null, result = null;
 
   // ---- file selection --------------------------------------------------
