@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tiny6 diagnostic</title>
+
+<script src="tiny6/ffmpeg.js"></script>
+<script src="tiny6/util.js"></script>
+<script src="tiny6/scaffold.js"></script>
+<script src="tiny6/tiny6-player.js"></script>
+
+<style>
+  body{margin:0;padding:24px 18px 60px;background:#0b1838;color:#eef4ff;
+       font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:#8fa8cf;font-size:13px;margin:0 0 18px}
+  .panel{background:#0d1f45;border:1px solid #2b4a7a;border-radius:8px;padding:14px 16px;margin:12px 0}
+  h2{font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:#7eb3ff;margin:0 0 10px}
+  button{padding:9px 15px;border-radius:6px;border:1px solid #3d66a3;background:#17376d;
+         color:#fff;font-size:13px;cursor:pointer;margin:3px 6px 3px 0}
+  button:hover:not(:disabled){background:#1e4a8a}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.go{background:#0f5c2e;border-color:#1a9e50}
+  #log{background:#050c1c;border:1px solid #2b4a7a;border-radius:6px;padding:10px;
+       height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+       font:11px/1.45 ui-monospace,Consolas,monospace;color:#b9d4ff}
+  .ok{color:#4ade80} .bad{color:#f87171} .hi{color:#fde68a} .dim{color:#7e94b8}
+  .note{border-left:2px solid #fbbf24;padding-left:10px;color:#e2d6a8;font-size:12px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Tiny6 diagnostic</h1>
+  <p class="sub">Shows ffmpeg's own output on screen. Nothing leaves this page.</p>
+
+  <div class="panel">
+    <h2>1 · Pick a video</h2>
+    <input type="file" id="file" accept="video/*">
+    <div class="note">Run the tests in order. If a test fails, RELOAD the page before
+      running another one — a failed ffmpeg call can leave the wasm core in a bad state,
+      which makes every later call return an empty log.</div>
+  </div>
+
+  <div class="panel">
+    <h2>2 · Tests</h2>
+    <button id="tCaps">A · Load engine + list encoders</button>
+    <button id="tProbe" disabled>B · Probe only</button>
+    <button id="tRaw" disabled>C · Minimal encode (bypass scaffold args)</button>
+    <button id="tFull" class="go" disabled>D · Full tn6 convert</button>
+    <button id="tClear">Clear log</button>
+  </div>
+
+  <div class="panel">
+    <h2>3 · Output</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var logEl = $('log');
+
+  function w(text, cls) {
+    var s = document.createElement('span');
+    if (cls) s.className = cls;
+    s.textContent = text + '\n';
+    logEl.appendChild(s);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function rule(t) { w('\n=========== ' + t + ' ===========', 'hi'); }
+
+  var engine = new Scaffold({ corePath: 'tiny6', coreType: 'st' });
+
+  // Route ALL ffmpeg output to the on-screen log. This is the piece the
+  // normal page does not do, which is why failures there are opaque.
+  engine._userLog = function (line) { w(line, 'dim'); };
+
+  var file = null;
+  $('file').addEventListener('change', function () {
+    file = this.files[0] || null;
+    if (!file) return;
+    w('File: ' + file.name + '  ·  ' + file.size + ' bytes  ·  type="' + (file.type || '(none)') + '"', 'ok');
+    $('tProbe').disabled = false;
+    $('tRaw').disabled = false;
+    $('tFull').disabled = false;
+  });
+  $('tClear').addEventListener('click', function () { logEl.textContent = ''; });
+
+  function fail(e) {
+    w('FAILED: ' + (e && e.message ? e.message : String(e)), 'bad');
+    if (e && e.stack) w(String(e.stack).split('\n').slice(0, 4).join('\n'), 'bad');
+  }
+
+  // ---- A: load + capabilities ------------------------------------------
+  $('tCaps').addEventListener('click', function () {
+    rule('A · LOAD ENGINE');
+    engine._prog = function (p) { w('[' + p.stage + ' ' + Math.round(p.percent) + '%] ' + p.message, 'dim'); };
+    engine.capabilities().then(function (c) {
+      w('Engine loaded. usingMT=' + engine.usingMT + '  coreType=' + engine.coreType, 'ok');
+      var keys = Object.keys(c).sort();
+      keys.forEach(function (k) {
+        var v = c[k];
+        if (typeof v === 'boolean') w('  ' + k + ' = ' + v, v ? 'ok' : 'bad');
+      });
+      w('(full object below)', 'dim');
+      try { w(JSON.stringify(c, null, 1)); } catch (e) {}
+    }).catch(fail);
+  });
+
+  // ---- B: probe only ---------------------------------------------------
+  $('tProbe').addEventListener('click', function () {
+    rule('B · PROBE');
+    w('Runs: ffmpeg -hide_banner -i <src> -t 0.1 -f null -', 'hi');
+    engine.probe(file).then(function (i) {
+      w('PROBE OK', 'ok');
+      try { w(JSON.stringify(i, null, 1)); } catch (e) {}
+    }).catch(fail);
+  });
+
+  // ---- C: minimal encode, bypassing scaffold's argument builder --------
+  // Deliberately omits -row-mt (needs threads, and this core is
+  // single-threaded), omits luma, omits setsar, omits audio.
+  $('tRaw').addEventListener('click', function () {
+    rule('C · MINIMAL ENCODE');
+    var src = null;
+    engine.load().then(function () {
+      return engine._attach(file, 0);
+    }).then(function (s) {
+      src = s;
+      w('input mounted at ' + s.path + '  (WORKERFS mount=' + s.mounted + ')', s.mounted ? 'ok' : 'hi');
+      var args = ['-hide_banner', '-y', '-i', s.path,
+                  '-t', '3',
+                  '-vf', 'scale=512:384',
+                  '-c:v', 'libvpx-vp9', '-crf', '36', '-b:v', '0',
+                  '-deadline', 'realtime', '-cpu-used', '8',
+                  '-an', 'raw.webm'];
+      w('Runs: ffmpeg ' + args.join(' '), 'hi');
+      return engine._exec(args, 300000);
+    }).then(function (r) {
+      w('exit code = ' + r.code, r.code === 0 ? 'ok' : 'bad');
+      return engine.ffmpeg.readFile('raw.webm');
+    }).then(function (d) {
+      var n = d && d.length ? d.length : 0;
+      w('raw.webm = ' + n + ' bytes', n ? 'ok' : 'bad');
+      if (n) w('MINIMAL ENCODE WORKS — the core is fine, the problem is in the argument set.', 'ok');
+      else   w('MINIMAL ENCODE ALSO EMPTY — the problem is the core or the input mount, not the args.', 'bad');
+      return engine._detach(src);
+    }).catch(function (e) { fail(e); if (src) engine._detach(src); });
+  });
+
+  // ---- D: the real thing ----------------------------------------------
+  $('tFull').addEventListener('click', function () {
+    rule('D · FULL tn6 CONVERT');
+    var opts = Scaffold.preset('tn6', {
+      crf: 36,
+      luma: 1,
+      onLog: function (l) { w(l, 'dim'); },
+      onProgress: function (p) { w('[' + p.stage + ' ' + Math.round(p.percent) + '%] ' + p.message, 'dim'); }
+    });
+    engine.shrink(file, opts).then(function (r) {
+      w('CONVERT OK — ' + r.filename + ' · ' + r.blob.size + ' bytes', 'ok');
+      try { w(JSON.stringify(r.stats, null, 1)); } catch (e) {}
+    }).catch(fail);
+  });
+})();
+</script>
+</body>
+</html>
