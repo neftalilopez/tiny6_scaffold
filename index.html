@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tiny6_Scaffold_Codec</title>
 
-<!-- ffmpeg.wasm, from ./tiny6/. Not a CDN: @ffmpeg/ffmpeg builds a Worker
-     from 814.ffmpeg.js and cross-origin worker scripts are blocked.
-     814.ffmpeg.js MUST stay next to ffmpeg.js inside tiny6/ - ffmpeg.js
-     locates it by its own script URL, not by this page's URL. -->
+<!-- ffmpeg.wasm, flat, same folder as this file. Not a CDN: @ffmpeg/ffmpeg
+     builds a Worker from 814.ffmpeg.js and cross-origin workers are blocked.
+     814.ffmpeg.js MUST sit next to ffmpeg.js - ffmpeg.js locates it by its
+     own script URL. -->
 <script src="tiny6/ffmpeg.js"></script>
 <script src="tiny6/util.js"></script>
 
@@ -110,27 +110,48 @@
 &lt;video data-tn6="clip.tn6" controls&gt;&lt;/video&gt;
 
 &lt;script&gt;
-  // ---- WHY THIS IS BUILT THIS WAY --------------------------------------
-  // The single-threaded @ffmpeg/core cannot run two commands. When an
-  // ffmpeg command finishes, ffmpeg calls exit(), which aborts the whole
-  // wasm runtime -- the diagnostic log shows "Aborted()" at the end of
-  // every completed run. Anything executed afterwards runs on a dead core
-  // and returns nothing, which surfaced as the misleading errors
-  // "No video stream found" and "Encoding produced an empty file".
-  //
-  // So: one fresh core per ffmpeg command.
-  //   phase 1  probe   -> read stream details, then terminate the core
-  //   phase 2  encode   -> a brand new core, with shrink's internal probe
-  //                        stubbed out so the encode is its ONLY command
-  //
-  // capabilities() would also spend a command on `ffmpeg -encoders`, so
-  // _caps is pre-seeded from this core's real encoder list.
+  var engine = new Scaffold({
+    corePath: 'tiny6',
+    coreType: 'st'
+  });
+  engine.shrink(file, Scaffold.preset('tn6'))
+    .then(function (r) { Tiny6Player.attach(videoEl, r.blob); });
+&lt;/script&gt;</pre>
+    <p class="stat">
+      <code>scaffold.js</code> converts. <code>tiny6-player.js</code> plays, and
+      auto-upgrades any <code>&lt;video data-tn6="…"&gt;</code> on load. Neither
+      depends on the other, so a page that only plays .tn6 files can skip
+      scaffold.js and ffmpeg.wasm entirely — that is ~30 KB instead of ~30 MB.
+    </p>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var T6 = Scaffold.Tiny6;
+
+  // ---- WHY THIS PAGE DOES NOT JUST CALL shrink() ------------------------
+  // 1. capabilities() runs `ffmpeg -encoders`, spending a whole core.
+  //    _caps is pre-seeded instead, from this core's real encoder list.
+  // 2. Each wasm core reliably serves ONE ffmpeg command, so probe, pass 1
+  //    and pass 2 each get their own freshly created core.
+  // 3. The libvpx-vp9 ENCODER traps and kills the runtime in this core
+  //    build (diag2.html proved it: stream copy, libx264 and VP8 all
+  //    encode fine from the same input; only VP9 dies, at any size, with
+  //    threading disabled). So the codec is VP8.
+  // 4. Two-pass: pass 1 writes ffmpeg2pass-0.log, which is read out of
+  //    core 2 and written into core 3 by hand, since each core has its own
+  //    in-memory filesystem.
   var CAPS = {
     h264: true, vp9: true, vp8: true, hevc: true, av1: false,
     aac: true, opus: true, multithread: false,
     all: { libx264:true, 'libvpx-vp9':true, libvpx:true, libx265:true,
            aac:true, libopus:true, libvorbis:true }
   };
+  var LOGFILE = 'ffmpeg2pass-0.log';
 
   function makeEngine(onProgress) {
     var e = new Scaffold({ corePath: 'tiny6', coreType: 'st' });
@@ -139,28 +160,106 @@
     return e;
   }
 
-  // Probe on one core, encode on another. The core is cheap to recreate
-  // because the 31 MB wasm is already in the browser cache.
+  function lumaFilter(L) {
+    if (!L || L >= 1) return null;
+    return 'lutyuv=y=val*' + L.toFixed(4) + '+' + (16 * (1 - L)).toFixed(2);
+  }
+  function vfFor(luma) {
+    var lf = lumaFilter(luma), chain = T6.filterChain();
+    return lf ? lf + ',' + chain : chain;
+  }
+
   function convert(file, opts) {
-    var prog = opts.onProgress;
-    var probeEngine = makeEngine(prog);
-    return probeEngine.probe(file).then(function (info) {
-      probeEngine.terminate();
-      var encEngine = makeEngine(prog);
-      // shrink() calls this.probe() internally; that would burn this
-      // core's one command before the encode ever starts.
-      encEngine.probe = function () { return Promise.resolve(info); };
-      return encEngine.shrink(file, opts).then(function (r) {
-        encEngine.terminate();
-        return r;
-      }, function (err) {
-        encEngine.terminate();
-        throw err;
-      });
-    }, function (err) {
-      probeEngine.terminate();
-      throw err;
+    var emit = function (pct, msg) {
+      opts.onProgress({ stage: 'encode', percent: pct, message: msg });
+    };
+    var info = null, statsLog = null;
+
+    var e1 = makeEngine(function (p) {
+      opts.onProgress({ stage: 'probe', percent: p.percent * 0.1, message: p.message });
     });
+    return e1.probe(file).then(function (i) {
+      info = i;
+      e1.terminate();
+
+      emit(10, 'Pass 1 of 2 \u2014 analysing');
+      var e2 = makeEngine(function (p) { emit(10 + p.percent * 0.4, 'Pass 1 of 2 \u2014 analysing'); });
+      return e2.load()
+        .then(function () { return e2._attach(file, info.headerBytes || 0); })
+        .then(function (s) {
+          return e2._exec(['-hide_banner','-y','-i', s.path,
+            '-vf', vfFor(opts.luma),
+            '-c:v','libvpx','-b:v','0','-crf', String(opts.crf),
+            '-auto-alt-ref','1','-lag-in-frames','16','-cpu-used','2',
+            '-pass','1','-passlogfile','ffmpeg2pass',
+            '-an','-f','webm','-'], 900000);
+        })
+        .then(function () { return e2.ffmpeg.readFile(LOGFILE); })
+        .then(function (d) {
+          statsLog = d;
+          e2.terminate();
+          if (!statsLog || !statsLog.length)
+            throw new Error('Pass 1 wrote no statistics log.');
+
+          emit(50, 'Pass 2 of 2 \u2014 encoding');
+          var e3 = makeEngine(function (p) { emit(50 + p.percent * 0.5, 'Pass 2 of 2 \u2014 encoding'); });
+          return e3.load()
+            .then(function () { return e3.ffmpeg.writeFile(LOGFILE, statsLog); })
+            .then(function () { return e3._attach(file, info.headerBytes || 0); })
+            .then(function (s) {
+              var audio = info.hasAudio ? ['-c:a','libopus','-b:a','96k','-ac','2'] : ['-an'];
+              return e3._exec(['-hide_banner','-y','-i', s.path,
+                '-vf', vfFor(opts.luma),
+                '-c:v','libvpx','-b:v','0','-crf', String(opts.crf),
+                '-auto-alt-ref','1','-lag-in-frames','16','-cpu-used','2',
+                '-pass','2','-passlogfile','ffmpeg2pass']
+                .concat(audio).concat(['out.webm']), 900000);
+            })
+            .then(function () { return e3.ffmpeg.readFile('out.webm'); })
+            .then(function (data) {
+              var payload = data instanceof Uint8Array ? data : new Uint8Array(data);
+              e3.terminate();
+              if (!payload.length)
+                throw new Error('Pass 2 produced an empty file. Check the ffmpeg output.');
+              return wrap(payload, file, info, opts);
+            });
+        });
+    }, function (err) { e1.terminate(); throw err; });
+  }
+
+  function wrap(payload, file, info, opts) {
+    var header = T6.buildHeader({
+      payloadBytes: payload.length,
+      width: T6.CODED_W, height: T6.CODED_H,
+      fpsNum: Math.round((info.fps || 30) * 1000), fpsDen: 1000,
+      sampleRate: info.sampleRate || 48000,
+      channels: info.hasAudio ? 2 : 0,
+      audioKbps: info.hasAudio ? 96 : 0,
+      videoCodec: 'VP8',
+      audioCodec: info.hasAudio ? 'OPUS' : '',
+      mime: 'video/webm',
+      sourceFormat: (file.name.split('.').pop() || '').toUpperCase(),
+      title: T6.makeTitle(file.name)
+    });
+    var out = new Uint8Array(header.length + payload.length);
+    out.set(header, 0); out.set(payload, header.length);
+    var blob = new Blob([out], { type: 'application/octet-stream' });
+    return {
+      blob: blob,
+      filename: file.name.replace(/\.[^.]+$/, '') + '.tn6',
+      stats: {
+        originalBytes: file.size, outputBytes: blob.size,
+        reductionPercent: (1 - blob.size / file.size) * 100,
+        grew: blob.size > file.size,
+        crf: opts.crf,
+        luma: opts.luma < 1 ? opts.luma : null,
+        lumaMode: 'safe',
+        ssim: null,
+        summary: 'Two-pass VP8 \u00b7 ' + fmt(file.size) + ' \u2192 ' + fmt(blob.size),
+        warnings: opts.luma < 1
+          ? ['Luma scaled to ' + opts.luma.toFixed(2) + '. This is permanent.'] : []
+      }
+    };
   }
 
   var chosen = null, result = null;
@@ -178,7 +277,7 @@
 
   function pick(f) {
     chosen = f;
-    drop.textContent = f.name + '  ·  ' + (f.size / 1048576).toFixed(2) + ' MB';
+    drop.textContent = f.name + '  \u00b7  ' + (f.size / 1048576).toFixed(2) + ' MB';
     drop.appendChild(input);
     $('run').disabled = false;
     $('stat').textContent = 'Ready to convert.';
@@ -206,15 +305,15 @@
     $('outPanel').classList.add('hide');
     $('stat').textContent = 'Loading ffmpeg\u2026';
 
-    var opts = Scaffold.preset('tn6', {
+    var opts = {
       crf: +$('crf').value,
       luma: (+$('luma').value) / 100,
       onProgress: function (p) {
         $('barI').style.width = p.percent + '%';
         $('stat').textContent = p.message +
-          (p.stage === 'encode' && p.percent > 0 ? ' \u2014 ' + Math.round(p.percent) + '%' : '');
+          (p.percent > 0 ? ' \u2014 ' + Math.round(p.percent) + '%' : '');
       }
-    });
+    };
 
     convert(chosen, opts).then(function (r) {
       result = r;
@@ -233,8 +332,7 @@
         row('display', meta.displayWidth + '\u00d7' + meta.displayHeight + ' (anamorphic)') +
         row('codec', meta.videoCodec + (meta.audioCodec ? ' / ' + meta.audioCodec : '')) +
         row('crf', s.crf) +
-        (s.luma ? row('luma', s.luma.toFixed(2) + ' (' + s.lumaMode + ')') : '') +
-        (s.ssim != null ? row('ssim', s.ssim.toFixed(4)) : '');
+        (s.luma ? row('luma', s.luma.toFixed(2) + ' (' + s.lumaMode + ')') : '');
       $('warns').innerHTML = (s.warnings || []).map(function (w) {
         return '<p class="note">' + esc(w) + '</p>';
       }).join('');
