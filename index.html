@@ -58,8 +58,6 @@
   code{background:var(--deep);padding:2px 6px;border-radius:3px;font-size:12px;color:#9ecbff}
   pre{background:var(--deep);border:1px solid var(--line);border-radius:6px;padding:12px;
       overflow:auto;font-size:12px;color:#9ecbff}
-  .credit{margin:26px 0 0;padding-top:16px;border-top:1px solid var(--line);
-          text-align:center;font-size:12px;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -102,54 +100,30 @@
 
   <div class="panel">
     <h2>Use these on your own page</h2>
-    <pre>&lt;!-- PLAYBACK ONLY - one file, no dependencies, ~6 KB --&gt;
-&lt;script src="tiny6/tiny6-player.js"&gt;&lt;/script&gt;
-&lt;video data-tn6="clip.tn6" controls&gt;&lt;/video&gt;
-
-
-&lt;!-- CONVERTING - needs ffmpeg.wasm, ~31 MB. Same origin, not a CDN:
-     @ffmpeg/ffmpeg builds a Worker and cross-origin workers are blocked.
-     814.ffmpeg.js is not referenced anywhere but IS required - ffmpeg.js
-     loads it as its worker, from its own folder. Ship all five. --&gt;
+    <pre>&lt;!-- serve these from your own origin, not a CDN --&gt;
 &lt;script src="tiny6/ffmpeg.js"&gt;&lt;/script&gt;
 &lt;script src="tiny6/util.js"&gt;&lt;/script&gt;
 &lt;script src="tiny6/scaffold.js"&gt;&lt;/script&gt;
 &lt;script src="tiny6/tiny6-player.js"&gt;&lt;/script&gt;
-&lt;!-- plus tiny6/814.ffmpeg.js, ffmpeg-core.js, ffmpeg-core.wasm --&gt;
+
+&lt;!-- play an existing .tn6, no JS needed --&gt;
+&lt;video data-tn6="clip.tn6" controls&gt;&lt;/video&gt;
 
 &lt;script&gt;
-  // This core serves ONE ffmpeg command per instance, so build a fresh
-  // engine for each step rather than reusing one.
-  function engine() {
-    var e = new Scaffold({ corePath: 'tiny6', coreType: 'st' });
-    // Skips `ffmpeg -encoders`, which would spend the core's one command.
-    e._caps = { h264:true, vp9:true, vp8:true, hevc:true, av1:false,
-                aac:true, opus:true, multithread:false, all:{} };
-    return e;
-  }
-
-  // NOTE: preset('tn6') defaults to VP9, and the libvpx-vp9 encoder traps
-  // in this core build. Use VP8.
-  var e1 = engine();
-  e1.probe(file).then(function (info) {
-    e1.terminate();
-    var e2 = engine();
-    e2.probe = function () { return Promise.resolve(info); };
-    return e2.shrink(file, Scaffold.preset('tn6', { codec: 'vp8' }))
-             .then(function (r) { e2.terminate(); return r; });
-  }).then(function (r) {
-    Tiny6Player.attach(videoEl, r.blob);
+  var engine = new Scaffold({
+    corePath: 'tiny6',
+    coreType: 'st'
   });
+  engine.shrink(file, Scaffold.preset('tn6'))
+    .then(function (r) { Tiny6Player.attach(videoEl, r.blob); });
 &lt;/script&gt;</pre>
     <p class="stat">
       <code>scaffold.js</code> converts. <code>tiny6-player.js</code> plays, and
-      auto-upgrades any <code>&lt;video data-tn6="…"&gt;</code> on load. The player
-      has no dependencies at all — a page that only plays .tn6 files ships one
-      6 KB file instead of ~31 MB of ffmpeg.wasm.
+      auto-upgrades any <code>&lt;video data-tn6="…"&gt;</code> on load. Neither
+      depends on the other, so a page that only plays .tn6 files can skip
+      scaffold.js and ffmpeg.wasm entirely — that is ~30 KB instead of ~30 MB.
     </p>
   </div>
-
-  <p class="credit">Tool created by streamingwebsolutions</p>
 
 </div>
 
@@ -216,7 +190,7 @@
           return e2._exec(['-hide_banner','-y','-i', s.path,
             '-vf', vfFor(opts.luma),
             '-c:v','libvpx','-b:v','0','-crf', String(opts.crf),
-            '-auto-alt-ref','1','-lag-in-frames','16','-cpu-used','4',
+            '-auto-alt-ref','1','-lag-in-frames','16','-cpu-used','2',
             '-pass','1','-passlogfile','ffmpeg2pass',
             '-an','-f','webm','-'], 900000);
         })
@@ -237,7 +211,7 @@
               return e3._exec(['-hide_banner','-y','-i', s.path,
                 '-vf', vfFor(opts.luma),
                 '-c:v','libvpx','-b:v','0','-crf', String(opts.crf),
-                '-auto-alt-ref','1','-lag-in-frames','16','-cpu-used','4',
+                '-auto-alt-ref','1','-lag-in-frames','16','-cpu-used','2',
                 '-pass','2','-passlogfile','ffmpeg2pass']
                 .concat(audio).concat(['out.webm']), 900000);
             })
